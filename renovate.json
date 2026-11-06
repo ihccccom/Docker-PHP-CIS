@@ -1,6 +1,198 @@
+// =======================================================
+// Renovate 配置 —— 自动监控并更新 PHP-FPM 镜像仓库的依赖
+// 文件位置：.github/renovate.json5
+// 语法：JSON5（允许注释和末尾逗号）
+// =======================================================
+//
+// 监控范围（仅这三类，其余全部不碰）：
+//   1. Dockerfile 中的基础镜像        debian:bookworm-slim
+//   2. Dockerfile 中的 PHP 源码版本    ARG PHP_VERSION=x.y.z
+//   3. Dockerfile 中的扩展版本         ARG REDIS_VERSION 等（仅当你填了具体版本才生效）
+//   4. GitHub Actions 工作流中的 action  actions/checkout 等
+//
+// 不监控 docker-compose*.yml：里面的 image 是你自己的镜像
+// （php-fpm:latest / ihccccom/php-fpm:latest），不是上游依赖。
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ]
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  extends: [
+    // 官方推荐的基础配置：开启 Dependency Dashboard、合理的分支/PR 命名等
+    "config:recommended",
+    // 把 Dockerfile 里的 FROM 镜像固定到 sha256 摘要（可复现 + 能收到安全补丁重建）
+    "docker:pinDigests",
+    // 把 workflow 里的 action 固定到提交 SHA，并在行尾注释真实版本号
+    "helpers:pinGitHubActionDigestsToSemver",
+  ],
+
+  timezone: "Asia/Shanghai",
+  labels: ["dependencies"],
+  // 同时最多保持 3 个未合并的更新 PR，避免一次性刷屏
+  prConcurrentLimit: 3,
+  prHourlyLimit: 3,
+  // 在仓库 Issues 中生成一个"依赖仪表盘"，可查看所有待处理更新
+  dependencyDashboard: true,
+
+  // 白名单：只启用下面这些 manager，其余一律关闭
+  // custom.regex = 下方 customManagers 里自定义的正则匹配规则
+  enabledManagers: ["dockerfile", "github-actions", "custom.regex"],
+
+  // ---------------------------------------------------
+  // 自定义规则：让 Renovate 读懂 Dockerfile 里的 ARG 版本号
+  // ---------------------------------------------------
+  customManagers: [
+    {
+      // PHP 源码版本。仅匹配形如 8.5.3 的正式版本号，
+      // 通过 extractVersionTemplate 过滤掉 RC / alpha / beta 标签。
+      customType: "regex",
+      description: "PHP 源码版本 (ARG PHP_VERSION)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG PHP_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "php/php-src",
+      extractVersionTemplate: "^php-(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+
+    // 下面 6 条是第三方扩展。你的 Dockerfile 里它们目前都是 ""（留空 = 构建时取最新），
+    // 空值不会匹配，所以这些规则现在不起作用；
+    // 一旦你把某个 ARG 改成具体版本（如 ARG REDIS_VERSION=6.3.0），它就会自动被监控。
+    {
+      customType: "regex",
+      description: "phpredis 版本 (ARG REDIS_VERSION，git tag)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG REDIS_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "phpredis/phpredis",
+      extractVersionTemplate: "^(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+    {
+      customType: "regex",
+      description: "imagick 版本 (ARG IMAGICK_VERSION，git tag)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG IMAGICK_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "Imagick/imagick",
+      extractVersionTemplate: "^(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+    {
+      // Dockerfile 里实际执行 git clone -b "v${SNUFFLEUPAGUS_VERSION}"，
+      // 所以 ARG 里写不带 v 的版本号（如 0.11.0），这里的 tag 带 v 前缀。
+      customType: "regex",
+      description: "Snuffleupagus 版本 (ARG SNUFFLEUPAGUS_VERSION，git tag，不带 v)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG SNUFFLEUPAGUS_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "jvoisin/snuffleupagus",
+      extractVersionTemplate: "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+    {
+      // 以下三个通过 pecl install 安装，PECL 版本号与上游仓库的 git tag 一致。
+      customType: "regex",
+      description: "memcached 版本 (ARG MEMCACHED_VERSION，pecl)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG MEMCACHED_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "php-memcached-dev/php-memcached",
+      extractVersionTemplate: "^v?(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+    {
+      customType: "regex",
+      description: "mongodb 版本 (ARG MONGODB_VERSION，pecl)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG MONGODB_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "mongodb/mongo-php-driver",
+      extractVersionTemplate: "^v?(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+    {
+      customType: "regex",
+      description: "swoole 版本 (ARG SWOOLE_VERSION，pecl)",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: ["ARG SWOOLE_VERSION=\"?(?<currentValue>\\d[^\"\\s]*)\"?"],
+      datasourceTemplate: "github-tags",
+      depNameTemplate: "swoole/swoole-src",
+      extractVersionTemplate: "^v?(?<version>\\d+\\.\\d+\\.\\d+)$",
+      versioningTemplate: "semver",
+    },
+  ],
+
+  // ---------------------------------------------------
+  // 更新策略
+  // ---------------------------------------------------
+  // 全局不自动合并：所有更新都先变成 PR，由你确认后手动合并。
+  // 原因：合并到 main 会立即触发约 1-2 小时的多架构构建并推送 latest 标签，
+  // 而当前没有 PR 阶段的构建校验，不适合无人值守合并。
+  automerge: false,
+
+  packageRules: [
+    // ---- PHP 本体 ----
+    {
+      matchDepNames: ["php/php-src"],
+      addLabels: ["php"],
+      // 前提：Dockerfile 中 ARG PHP_SHA256 保持为空，构建时由 Dockerfile 自动从 php.net 获取校验值。
+      // 如果以后改回写死哈希，Renovate 不会同步更新它，构建会校验失败。
+    },
+    {
+      // PHP 补丁版本（8.5.3 → 8.5.4）自动提 PR；
+      // 次版本/主版本（8.5 → 8.6 / 9.0）可能改变行为，需先在仪表盘勾选批准才会创建 PR。
+      matchDepNames: ["php/php-src"],
+      matchUpdateTypes: ["minor", "major"],
+      dependencyDashboardApproval: true,
+    },
+
+    // ---- 基础镜像 debian ----
+    {
+      // Dockerfile 的运行时依赖写死了 bookworm 的包名
+      // （libicu72、libavif15、libzip4、libtidy5deb1、libldap-2.5-0 等），
+      // 换到新的 Debian 大版本会装包失败，所以禁止 major 升级。
+      // 摘要（digest）更新不受影响，仍会收到安全补丁重建。
+      matchPackageNames: ["debian"],
+      matchUpdateTypes: ["major"],
+      enabled: false,
+    },
+    {
+      // 基础镜像摘要更新比较频繁，合并成每周一早上 6 点前集中处理，减少无谓重建。
+      matchDatasources: ["docker"],
+      matchUpdateTypes: ["digest", "pin", "pinDigest"],
+      schedule: ["before 6am on monday"],
+    },
+
+    // ---- 第三方 PHP 扩展 ----
+    {
+      matchDepNames: [
+        "phpredis/phpredis",
+        "Imagick/imagick",
+        "jvoisin/snuffleupagus",
+        "php-memcached-dev/php-memcached",
+        "mongodb/mongo-php-driver",
+        "swoole/swoole-src",
+      ],
+      addLabels: ["php-extension"],
+    },
+
+    // ---- GitHub Actions ----
+    {
+      // 小版本/补丁/摘要更新合并为一个 PR；大版本单独成 PR，便于逐个检查。
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch", "pin", "pinDigest", "digest"],
+      groupName: "GitHub Actions",
+      addLabels: ["github-actions"],
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["major"],
+      addLabels: ["github-actions"],
+    },
+    {
+      // 不让 Renovate 改 runs-on 里的运行器标签（ubuntu-latest / ubuntu-24.04-arm），
+      // 运行器版本由你手动决定。
+      matchDatasources: ["github-runners"],
+      enabled: false,
+    },
+  ],
 }
