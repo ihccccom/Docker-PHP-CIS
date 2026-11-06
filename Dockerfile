@@ -108,7 +108,7 @@ ARG USE_snuffleupagus=true
 # PHP 版本（必须手动指定）
 ARG PHP_VERSION=8.5.3
 # PHP 源码包 SHA256 校验值（与 PHP_VERSION 同步更新，留空则自动从官方 API 获取）
-ARG PHP_SHA256=402654d99b4beda602d4daec4f1cd39aafdacf5923e3e947da87392826660146
+ARG PHP_SHA256=
 
 # Redis 扩展版本（留空自动获取最新版）
 ARG REDIS_VERSION=""
