@@ -667,6 +667,7 @@ RUN set -eux; \
 
 # 复制 Snuffleupagus 安全规则配置（条件性使用）
 COPY conf/snuffleupagus.rules ${PHP_DIR}/etc/snuffleupagus.rules
+COPY conf/snuffleupagus-wordpress.rules ${PHP_DIR}/etc/snuffleupagus-wordpress.rules
 
 # 创建默认 PHP 测试页面（仅返回状态信息，不暴露 phpinfo - PCI DSS 合规）
 RUN echo '<?php echo "OK"; ?>' > /www/wwwroot/html/index.php
