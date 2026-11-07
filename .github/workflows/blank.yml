@@ -187,9 +187,9 @@ jobs:
             USE_redis=${{ github.event.inputs.use_redis || 'true' }}
             USE_memcached=${{ github.event.inputs.use_memcached || 'true' }}
             USE_imagick=${{ github.event.inputs.use_imagick || 'true' }}
-            USE_mongodb=${{ github.event.inputs.use_mongodb || 'false' }}
+            USE_mongodb=${{ github.event.inputs.use_mongodb || 'true' }}
             USE_swoole=${{ github.event.inputs.use_swoole || 'false' }}
-            USE_snuffleupagus=${{ github.event.inputs.use_snuffleupagus || 'false' }}
+            USE_snuffleupagus=${{ github.event.inputs.use_snuffleupagus || 'true' }}
 
 
       # ==========================================
@@ -291,9 +291,9 @@ jobs:
             USE_redis=${{ github.event.inputs.use_redis || 'true' }}
             USE_memcached=${{ github.event.inputs.use_memcached || 'true' }}
             USE_imagick=${{ github.event.inputs.use_imagick || 'true' }}
-            USE_mongodb=${{ github.event.inputs.use_mongodb || 'false' }}
+            USE_mongodb=${{ github.event.inputs.use_mongodb || 'true' }}
             USE_swoole=${{ github.event.inputs.use_swoole || 'false' }}
-            USE_snuffleupagus=${{ github.event.inputs.use_snuffleupagus || 'false' }}
+            USE_snuffleupagus=${{ github.event.inputs.use_snuffleupagus || 'true' }}
 
 
       # ==========================================
