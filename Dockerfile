@@ -617,7 +617,7 @@ RUN mkdir -p \
 # ============================================================
 
 # 复制 PHP 配置文件
-COPY conf/php.ini ${PHP_DIR}/etc/php.ini
+# COPY conf/php.ini ${PHP_DIR}/etc/php.ini
 COPY conf/php-fpm.conf ${PHP_DIR}/etc/php-fpm.conf
 COPY conf/www.conf ${PHP_DIR}/etc/php-fpm.d/www.conf
 
