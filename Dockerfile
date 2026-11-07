@@ -630,9 +630,14 @@ COPY conf/www.conf ${PHP_DIR}/etc/php-fpm.d/www.conf
 
 # 根据编译选项条件性启用扩展配置
 RUN set -eux; \
-    # PHP 8.x OPcache 为独立 Zend 扩展，需通过 zend_extension=opcache.so 加载
+    # PHP 8.5+ 已把 OPcache 内置进 PHP 本体，不再生成 opcache.so，
+    # 此时再写 zend_extension=opcache.so 会报 "Failed loading Zend extension" 警告。
+    # PHP 8.4 及以下仍是独立 Zend 扩展，需要加载。这里按 opcache.so 是否真实存在来判断。
     if [ "${USE_opcache}" = "true" ]; then \
-      echo "zend_extension=opcache.so" > ${PHP_DIR}/etc/conf.d/10-opcache.ini; \
+      : > ${PHP_DIR}/etc/conf.d/10-opcache.ini; \
+      if [ -f "$(${PHP_DIR}/bin/php-config --extension-dir)/opcache.so" ]; then \
+        echo "zend_extension=opcache.so" >> ${PHP_DIR}/etc/conf.d/10-opcache.ini; \
+      fi; \
       echo "opcache.enable=1" >> ${PHP_DIR}/etc/conf.d/10-opcache.ini; \
       echo "opcache.enable_cli=0" >> ${PHP_DIR}/etc/conf.d/10-opcache.ini; \
     else \
