@@ -1,0 +1,452 @@
+# =====================================================================
+# Snuffleupagus 规则 —— WordPress 专用（企业级加固版）
+# =====================================================================
+#
+# 【用途】 放进 PHP-FPM 镜像，作为 PHP 运行时的"第二道防线"。
+#          第一道防线仍是 php.ini 的 disable_functions / open_basedir 等。
+# 【要求】 PHP 8.0 及以上（参数名按 PHP 8 编写）。Snuffleupagus 需为较新版本。
+# 【放置】 仓库里存为 conf/snuffleupagus.rules，构建后位于镜像内
+#          /opt/php/etc/snuffleupagus.rules（由 30-snuffleupagus.ini 的
+#          sp.configuration_file 指向）。
+#          ★ 你的 compose 把 php-conf 命名卷挂在 /opt/php/etc 上：卷已存在时，
+#            更新镜像【不会】覆盖卷里的旧规则文件，需手动覆盖（见文末"部署步骤"）。
+#
+# 【规则如何生效】
+#   - 规则在 PHP-FPM 启动时一次性加载，修改后必须重启容器才生效。
+#   - 规则从上到下依次匹配，同一个函数上"第一条命中的规则"决定结果：
+#       .allow() 命中 = 放行并停止匹配；  .drop() 命中 = 终止请求。
+#     所以每个函数的 allow 规则必须写在 drop 规则前面，本文件已按此排序，请勿调换顺序。
+#   - 触发 .drop() 后：当前请求被终止，浏览器收到 HTTP 500；
+#     PHP 错误日志里出现一行形如
+#       PHP Fatal error: [snuffleupagus][0.0.0.0][disabled_function][drop] Aborted execution on call of the function 'xxx' ...
+#     日志位置（你的 www.conf 里 php_admin_value[error_log]）：
+#       docker exec php tail -n 50 /opt/php/var/log/php_error.log
+#     查看全部拦截记录：
+#       docker exec php grep "snuffleupagus" /opt/php/var/log/php_error.log
+#   - 模拟模式（simulation）：把 .drop() 换成 .drop().simulation()，命中时只记日志
+#     （标记为 [simulation]）、不终止请求，用来在正式拦截前观察误报，见文末"部署步骤"。
+#
+# 【规则索引】（每条规则的详细说明见对应章节；验证脚本 verify-snuffleupagus.sh 的用例编号与此一致）
+#   R01 日志输出位置                    R09 eval() 内禁止执行类函数
+#   R02 安全随机数                      R10 环境变量注入（putenv）
+#   R03 XXE 防护                        R11 邮件参数注入（mail / mb_send_mail）
+#   R04 Cookie 自动 Secure              R12 上传文件目标路径限制
+#   R05 Cookie SameSite=Lax             R13 禁止危险文件权限（chmod）
+#   R06 禁止改 open_basedir             R14 include/require 限制
+#   R07 禁止改断言开关                  R15 curl 安全（file:// 与 SSLENGINE）
+#   R08 命令注入第二道防线
+#
+# 【验证状态说明】
+#   "已验证"  = 在真实 WordPress 核心（7.2-beta）+ 真实 Snuffleupagus 上做过端到端测试：
+#               登录、后台、设置页、admin-ajax、REST、WP-Cron、维护模式、媒体上传均正常。
+#   "未验证"  = 第三方插件/主题的行为我无法穷尽，务必先走"模拟模式"观察再正式拦截。
+# =====================================================================
+
+
+# =====================================================================
+# R01 日志输出位置
+# =====================================================================
+# 作用    ：让 Snuffleupagus 把日志写入 PHP 自己的错误日志（而不是 syslog）。
+# 生效方式：全局设置，加载即生效。这是默认值，写出来是为了让行为明确。
+# 触发后  ：无拦截行为。
+# WP 影响 ：无。
+# 验证    ：用例 R01（规则文件能被成功加载）。
+# 调整    ：若想写 syslog，改成 sp.log_media("syslog");（容器内通常不建议）。
+sp.log_media("php");
+
+
+# =====================================================================
+# R02 安全随机数
+# =====================================================================
+# 作用    ：把对 rand() / mt_rand() 的调用替换成密码学安全的 random_int()，
+#           防止用 rand/mt_rand 生成的 token、临时密码、验证码被猜出（官方文档说明）。
+# 生效方式：全局设置，加载即生效，对所有 PHP 代码（含插件）有效。
+# 触发后  ：无拦截，只是返回值更安全。
+# WP 影响 ：已验证核心不受影响（WordPress 的 wp_rand() 本身就优先用 random_int）。
+#           副作用：依赖 mt_srand(种子) 得到"可重复随机序列"的代码（少数游戏、测试类插件）
+#           将不再可重复。
+# 验证    ：用例 R02（mt_rand / rand 仍可正常返回数字）。
+# 调整    ：如发现某插件依赖可重复随机序列，删除这一行。
+sp.harden_random.enable();
+
+
+# =====================================================================
+# R03 XXE 防护
+# =====================================================================
+# 作用    ：防止 XML 外部实体注入（XXE）读取服务器文件（如 file:///etc/passwd）或发起 SSRF。
+#           做法（官方文档）：启动时调用 libxml_disable_entity_loader(true)，并把该函数
+#           置为空操作，之后代码无法再重新打开实体加载。
+# 生效方式：@condition 表示只有 xml 扩展已加载时才启用，
+#           避免在没有 xml 扩展的环境里产生 Warning。
+# 触发后  ：无拦截，只是 XML 解析不再加载外部实体。
+# WP 影响 ：已验证核心不受影响。PHP 8 + libxml2 2.9+ 默认本就不加载外部实体，
+#           这是额外一层保险；需要解析"带外部实体的 XML"的特殊插件会受影响（极少见）。
+# 验证    ：用例 R03（规则加载无报错）。
+# 调整    ：如在 PHP 8.5 下启动日志里出现与 libxml_disable_entity_loader 相关的
+#           报错，说明该函数在你的版本里已不存在，删掉本节三行即可（XXE 在新版本里默认已关闭）。
+@condition extension_loaded("xml");
+sp.xxe_protection.enable();
+@end_condition;
+
+
+# =====================================================================
+# R04 Cookie 自动加 Secure 标志
+# =====================================================================
+# 作用    ：当请求是通过 HTTPS 访问时，自动给所有 Cookie 加上 Secure 标志，
+#           防止 Cookie 被明文 HTTP 请求带出。
+# 生效方式：Snuffleupagus 检查 PHP 的 $_SERVER 里【是否存在 HTTPS 这个键】（读源码并实测确认）。
+#           ★ 注意：只看"键是否存在"，不看值是 on 还是 off！
+#             - nginx 标准 fastcgi_params 的写法是  fastcgi_param HTTPS $https if_not_empty;
+#               纯 HTTP 时该参数不传，HTTPS 时传 on → 本规则表现正确；
+#             - TLS 由前面的其他代理（CDN/另一层 nginx）终结、你的 nginx 只走 HTTP 时，
+#               需要写  fastcgi_param HTTPS on;  才会生效；
+#             - 【千万不要】写  fastcgi_param HTTPS off;  ——键存在，会导致纯 HTTP 访问时
+#               Cookie 也被加上 Secure，浏览器不再回传，登录会失效（实测）。
+#           另：PHP 默认 auto_globals_jit=On，脚本里没有引用过 $_SERVER 时该变量不会被构建，
+#               本规则就看不到 HTTPS。WordPress 核心大量引用 $_SERVER，所以不受影响。
+# 触发后  ：无拦截，只是响应头多了 Secure 属性。
+# WP 影响 ：WordPress 的所有 Cookie 都经 setcookie() 发出，会被加上 Secure。
+#           已用 nginx + PHP-FPM 实测：不传 HTTPS → 无 Secure；HTTPS on → 有 Secure。
+# 验证    ：手动：curl -sI https://你的站点/wp-login.php | grep -i "set-cookie"   应看到 "secure"。
+#           （验证脚本在容器里无法模拟 HTTPS，不覆盖本条。）
+# 调整    ：不需要。
+sp.auto_cookie_secure.enable();
+
+
+# =====================================================================
+# R05 Cookie SameSite=Lax
+# =====================================================================
+# 作用    ：给所有 Cookie 加上 SameSite=Lax，限制跨站 POST/PUT/DELETE 请求携带 Cookie，
+#           降低 CSRF 风险。name_r 是正则匹配，".*" 表示匹配所有名字的 Cookie。
+# 生效方式：Snuffleupagus 拦截 setcookie() 并改写 Cookie 属性。
+#           ★ 官方文档提醒：Cookie 类功能会影响其他也 hook setcookie 的扩展，
+#             如你同时装了此类扩展，注意加载顺序。
+# 触发后  ：无拦截，只改 Cookie 属性。
+# WP 影响 ：现代浏览器对未声明 SameSite 的 Cookie 本来就按 Lax 处理，所以正常行为不变。
+#           刻意不用 Strict：Strict 会让用户从邮件/外站点击链接进站时首个请求不带登录
+#           Cookie（看起来像"没登录"），WooCommerce 的支付网关回调也会受影响。
+# 验证    ：已用 nginx + PHP-FPM 实测：应用自己设置的 HttpOnly 等属性保留，
+#           并额外带上 SameSite=Lax。
+#           手动验证：curl -sI https://你的站点/wp-login.php | grep -i "set-cookie"
+#           应看到 "SameSite=Lax"。（验证脚本看不到响应头，不覆盖本条。）
+# 调整    ：若要对管理员 Cookie 更严，可再加（写在这条之前）：
+#           sp.cookie.name_r("^wordpress_sec_").samesite("strict");
+sp.cookie.name_r(".*").samesite("lax");
+
+
+# =====================================================================
+# R06 禁止通过 ini_set 修改 open_basedir
+# =====================================================================
+# 作用    ：防止攻击代码在运行时改写 open_basedir 来突破目录限制
+#           （经典绕过手法）。
+# 生效方式：当 ini_set 的第一个参数（option）匹配 open_basedir 时拦截。
+# 触发后  ：drop，请求终止并记日志。
+# WP 影响 ：已验证 WordPress 核心从不调用（对照源码确认）。
+#           个别备份/迁移类插件可能会尝试，行为属于它们自己的兼容问题。
+# 验证    ：用例 R06。
+# 调整    ：不建议放宽。
+sp.disable_function.function("ini_set").param("option").value_r("open_basedir").drop();
+
+
+# =====================================================================
+# R07 禁止通过 ini_set 修改断言开关
+# =====================================================================
+# 作用    ：防止运行时打开 assert.active / zend.assertions
+#           （打开后可被利用做代码注入或泄露信息）。
+# 生效方式：ini_set 的 option 精确等于这两个名字时拦截。
+# 触发后  ：drop。
+# WP 影响 ：已验证核心不调用。
+# 验证    ：用例 R07。
+# 调整    ：不需要。
+sp.disable_function.function("ini_set").param("option").value("assert.active").drop();
+sp.disable_function.function("ini_set").param("option").value("zend.assertions").drop();
+
+
+# =====================================================================
+# R08 命令注入第二道防线
+# =====================================================================
+# 作用    ：即使 php.ini 已禁用 system/exec 等函数，仍对它们设置第二道防线：
+#           命令字符串里只要出现 shell 元字符就拦截。
+#           元字符包括：$ | ; & ` 换行 ( ) \
+# 生效方式：对 6 个函数的 command 参数做正则匹配。
+#           ★ 这是"第二道"防线，不是第一道：
+#             1) 你的 php.ini 已经 disable_functions 了这些函数，函数本身不存在时，
+#                这些规则不会被触发（也无需触发）；
+#             2) proc_open 若传数组形式的命令（PHP 7.4+ 支持），参数不是字符串，
+#                本规则匹配不到，同样靠 disable_functions 兜底。
+# 触发后  ：drop。
+# WP 影响 ：已验证核心不使用这些函数。备份/图片优化类插件如果需要调用外部命令，
+#           必须先在 php.ini 的 disable_functions 里放开对应函数，而且命令里含元字符
+#           （比如管道）会被这里拦截——这是有意的。
+# 验证    ：用例 R08（分别验证 6 个函数的元字符拦截，以及无元字符命令不被拦截）。
+# 调整    ：某插件必须用管道时，不建议放宽本规则，应改用不含元字符的写法。
+sp.disable_function.function("system").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("shell_exec").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("exec").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("proc_open").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("passthru").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("popen").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+
+
+# =====================================================================
+# R09 eval() 内禁止直接调用执行类函数
+# =====================================================================
+# 作用    ：在 eval() 执行的代码里，如果调用了下列函数就拦截。
+#           这是 WebShell（一句话木马 eval($_POST[x])）最常见的利用方式。
+# 生效方式：sp.eval_blacklist 对 eval 字符串里出现的函数调用做检查。
+#           只检查 eval 里的代码，不影响正常文件里的函数调用。
+# 触发后  ：drop，日志中会注明在 eval 中调用了哪个函数。
+# WP 影响 ：已验证核心不受影响（核心不在 eval 里调用这些函数）。
+# 验证    ：用例 R09（eval 里调用 system 被拦截；eval 普通代码不被拦截）。
+# 调整    ：不需要。
+sp.eval_blacklist.list("system,exec,shell_exec,passthru,proc_open,popen");
+
+
+# =====================================================================
+# R10 环境变量注入（putenv）
+# =====================================================================
+# 作用    ：禁止通过 putenv 设置 LD_*、PATH、GCONV_* 开头的变量。
+#           这是"让 PHP 启动子进程时加载攻击者的库"这类绕过手法的核心
+#           （LD_PRELOAD + mail()/imagick 触发，GCONV_PATH + iconv 触发）。
+# 生效方式：putenv 的参数（形如 NAME=value）匹配以上前缀时拦截。
+# 触发后  ：drop。
+# WP 影响 ：已验证 WordPress 核心不调用 putenv（对照源码确认）。
+#           个别插件会 putenv("TZ=...")，不受影响（不在拦截前缀内）。
+# 验证    ：用例 R10。
+# 调整    ：不需要。
+sp.disable_function.function("putenv").param("assignment").value_r("^LD_").drop();
+sp.disable_function.function("putenv").param("assignment").value_r("^PATH").drop();
+sp.disable_function.function("putenv").param("assignment").value_r("^GCONV_").drop();
+
+
+# =====================================================================
+# R11 邮件参数注入（mail / mb_send_mail）
+# =====================================================================
+# 作用    ：mail() 第 5 个参数（additional_params）会被原样传给 sendmail，
+#           攻击者注入 -X /web/shell.php 之类参数可把邮件日志写成 WebShell
+#           （PHPMailer CVE-2016-10033 一类漏洞的利用方式）。
+# 生效方式：先 allow：参数恰好是 "-f发件人邮箱"（字符严格限定），放行；
+#           再 drop：其余任何包含 "-" 的参数都拦截。
+#           顺序不可颠倒：上游默认规则是"出现 - 就拦"，会误杀 PHPMailer 设置 Sender
+#           时正常生成的 -f 参数，所以这里先放行安全形式。
+# 触发后  ：drop。
+# WP 影响 ：已验证：WordPress 默认不带额外参数；PHPMailer 带 -f 时被放行。
+#           使用 SMTP 插件发信的站点完全不经过 mail()，不受影响。
+# 验证    ：用例 R11（-f 安全形式放行；-X、-oQ、"-f 后拼 -X" 被拦截）。
+# 调整    ：不需要。
+sp.disable_function.function("mail").param("additional_params").value_r("^-f[A-Za-z0-9._%+@-]+$").allow();
+sp.disable_function.function("mail").param("additional_params").value_r("\\-").drop();
+sp.disable_function.function("mb_send_mail").param("additional_params").value_r("^-f[A-Za-z0-9._%+@-]+$").allow();
+sp.disable_function.function("mb_send_mail").param("additional_params").value_r("\\-").drop();
+
+
+# =====================================================================
+# R12 上传文件目标路径限制
+# =====================================================================
+# 作用    ：move_uploaded_file() 是 PHP 保存上传文件的唯一入口。
+#           目标路径不允许是下列危险类型：
+#             - 能被当 PHP 执行的后缀：php、php3~php8、phtml、phar、pht、pgif、inc
+#             - 服务器配置文件：.htaccess、.htpasswd
+#             - .user.ini：PHP-FPM 会读取它，可用 auto_prepend_file 实现代码执行
+# 生效方式：对 move_uploaded_file 的第二个参数（to，目标路径）做正则匹配。
+#           正则要求后缀后面必须是"非字母数字"或结尾，因此 my.photo.jpg、
+#           report.phone.png 这类正常文件名不会被误杀（上游默认的 \.ph 会误杀它们）。
+# 触发后  ：drop，上传请求被终止（HTTP 500）。
+# WP 影响 ：已验证：正常图片（test.png、my.photo.png）上传成功；直接上传 shell.php
+#           被 WordPress 自己的类型检查拒绝，到不了这里。
+#           ★ 唯一的"误杀"：文件名里含 ".php" 的图片（例如 index.php.png）。
+#             WordPress 会把它改名成 index.php_.png，它本身无法被 nginx 当 PHP 执行，
+#             所以拦它属于纵深防御。代价是用户上传这类名字时请求被中断。
+#             如想只拦"最终后缀就是脚本"的情况，把第一条换成下面这条：
+#             sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.(php[0-9s]?|phtml|phar|pht|pgif|inc)$").drop();
+# 验证    ：用例 R12（正常文件名放行；.php、.php_.png、.phtml、.phar、.htaccess、.user.ini 拦截）。
+# 调整    ：只有第一条（脚本后缀）可以按上面"WP 影响"里给的宽松写法放宽；
+#           .htaccess / .user.ini 两条不建议放宽。
+sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.(php[0-9s]?|phtml|phar|pht|pgif|inc)([^a-zA-Z0-9]|$)").drop();
+sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.ht(access|passwd)([^a-zA-Z0-9]|$)").drop();
+sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.user\\.ini([^a-zA-Z0-9]|$)").drop();
+
+
+# =====================================================================
+# R13 禁止危险文件权限
+# =====================================================================
+# 作用    ：禁止把文件/目录权限设成 0666 或 0777（任何人可写），
+#           防止攻击者借此让文件被其他进程篡改。
+# 生效方式：chmod 的 permissions 参数是整数，0666 = 十进制 438，0777 = 十进制 511。
+# 触发后  ：drop。
+# WP 影响 ：已验证核心不触发。WordPress 默认使用 0644 / 0755（FS_CHMOD_FILE/DIR）。
+#           个别老旧插件硬编码 0777 建目录，会被拦——这类插件本身就有安全问题。
+# 验证    ：用例 R13。
+# 调整    ：不需要。
+sp.disable_function.function("chmod").param("permissions").value("438").drop();
+sp.disable_function.function("chmod").param("permissions").value("511").drop();
+
+
+# =====================================================================
+# R14 include / require 限制（防本地/远程文件包含）
+# =====================================================================
+# 作用    ：限制 include / include_once / require / require_once 能加载什么。
+# 生效方式：按以下顺序依次评估（顺序不可调换）：
+#           (a) 路径以"协议://"开头（http://、ftp://、data://、php://、phar://、
+#               expect://、zip:// 等）→ 直接拦截。防远程包含、伪协议包含、phar 反序列化。
+#           (b) 路径以 .php / .inc / .phtml 结尾 → 放行。
+#           (c) 路径以 /.maintenance 结尾 → 放行。
+#               WordPress 在升级期间会 require ABSPATH . '.maintenance'（wp-includes/load.php），
+#               上游默认规则会把它拦掉，导致更新核心/插件时站点直接 500。
+#           (d) 其余一律拦截（例如 include "/etc/passwd"、include "上传的.txt"）。
+# 触发后  ：drop。
+# WP 影响 ：已验证：登录、后台、REST、AJAX、WP-Cron、维护模式、媒体上传全部正常。
+#           未验证：个别主题/插件会 include .html / .tpl / .twig 模板文件，
+#           这类 include 会被拦。先走模拟模式，发现这类情况再针对性放行，例如：
+#           sp.disable_function.function("include").value_r("/某插件目录/.*\\.tpl$").allow();
+#           （放在 (d) 之前）。
+# 验证    ：用例 R14（含 http://、data://、php://、.txt、无后缀被拦；.php、.maintenance 放行）。
+# 调整    ：(a)(b)(c) 不建议改动；(d) 之前可以按"WP 影响"里的示例，为特定插件目录的
+#           .tpl / .html 模板追加 .allow() 规则。所有 allow 必须写在 (d) 的 drop 之前。
+
+# (a) 协议地址一律拦截（必须写在放行规则之前）
+sp.disable_function.function("include").value_r("^[a-zA-Z][a-zA-Z0-9+.-]*://").drop();
+sp.disable_function.function("include_once").value_r("^[a-zA-Z][a-zA-Z0-9+.-]*://").drop();
+sp.disable_function.function("require").value_r("^[a-zA-Z][a-zA-Z0-9+.-]*://").drop();
+sp.disable_function.function("require_once").value_r("^[a-zA-Z][a-zA-Z0-9+.-]*://").drop();
+
+# (b) 放行 .php / .inc / .phtml
+sp.disable_function.function("require_once").value_r("\\.(inc|phtml|php)$").allow();
+sp.disable_function.function("include_once").value_r("\\.(inc|phtml|php)$").allow();
+sp.disable_function.function("require").value_r("\\.(inc|phtml|php)$").allow();
+sp.disable_function.function("include").value_r("\\.(inc|phtml|php)$").allow();
+
+# (c) 放行 WordPress 维护模式文件
+sp.disable_function.function("require").value_r("/\\.maintenance$").allow();
+
+# (d) 其余全部拦截
+sp.disable_function.function("require_once").drop();
+sp.disable_function.function("include_once").drop();
+sp.disable_function.function("require").drop();
+sp.disable_function.function("include").drop();
+
+
+# =====================================================================
+# R15 curl 安全
+# =====================================================================
+# 作用    ：1) 禁止 curl 读取本地文件（file:// 协议，SSRF/任意文件读取）；
+#           2) 禁止设置 CURLOPT_SSLENGINE（编号 10089，历史上有被滥用于加载恶意引擎的漏洞）。
+# 生效方式：curl_init 的 url 参数、curl_setopt 的 value 参数以 file:// 开头时拦截；
+#           curl_setopt 的 option 等于 10089 时拦截。
+# 触发后  ：drop，日志中带 "file:// protocol is disabled" 的说明文字。
+# WP 影响 ：已验证核心不受影响（WordPress 的 HTTP API 只访问 http/https）。
+#           ★ 刻意没有拦"关闭 SSL 校验"（CURLOPT_SSL_VERIFYPEER=0）——上游默认规则会拦，
+#             但 WordPress 的 WP-Cron 回环请求、自动更新、站点健康检查在核心里就是
+#             sslverify=false，拦它会让触发 WP-Cron 的普通页面访问被杀（实测 500）。
+# 验证    ：用例 R15（file:// 被拦；https 放行；VERIFYPEER=0 放行）。
+# 调整    ：想监控"谁关了 SSL 校验"又不想中断请求，可用模拟模式记录：
+#           sp.disable_function.function("curl_setopt").param("option").value("64").param("value").value("0").drop().simulation();
+#           （注意：每次 WP-Cron 触发都会记一条，日志会比较吵。）
+sp.disable_function.function("curl_setopt").param("value").value_r("^file://").drop().alias("file:// protocol is disabled");
+sp.disable_function.function("curl_init").param("url").value_r("^file://").drop().alias("file:// protocol is disabled");
+sp.disable_function.function("curl_setopt").param("option").value("10089").drop();
+
+
+# =====================================================================
+# 【没有放进来的上游规则及原因】（均已对照 WordPress 官方源码或实测）
+# =====================================================================
+# [1] ini_set("memory_limit") 的 drop
+#     wp-includes/default-constants.php 每个请求都会 ini_set('memory_limit', ...)，
+#     wp_raise_memory_limit() 在后台和图片处理时也调用。drop = wp-admin 直接 500（实测）。
+# [2] ini_set("display_errors" / "error_reporting" / "error_log") 的 drop
+#     wp-includes/load.php 在 AJAX、REST、XML-RPC 请求中会 ini_set('display_errors', 0)；
+#     开启 WP_DEBUG_LOG 时还会 ini_set('error_log', ...)。drop 会让 admin-ajax 全部 500（实测）。
+# [3] curl 禁止关闭 SSL 校验 —— 见 R15 说明。
+# [4] function_exists("exec") / is_callable("system") / ini_get("open_basedir") 的 drop
+#     这是上游用来识别后门的"环境探测"规则；但 WordPress 站点健康页
+#     (class-wp-debug-data.php)、自动更新器 (class-wp-automatic-updater.php) 和大量
+#     备份/安全插件会正常探测这些，drop 会让对应后台页面崩溃。
+# [5] move_uploaded_file 的 \.ph / \.ht 过宽匹配
+#     会误杀 "my.photo.jpg" 一类正常文件名，已改为精确匹配（见 R12）。
+# [6] "system>base64_decode" 一类 WebShell 调用链规则、extract() 规则
+#     实测无效，所以不放进来，避免虚假的安全感：
+#     "a>b" 的含义是"在 a 的执行过程中调用了 b"，而 system(base64_decode(..)) 里
+#     base64_decode 先执行完才调用 system，二者从不重叠；
+#     extract($_GET) 的参数是数组，"^_" 这种字符串正则匹配不到。
+#     这两类攻击请依靠 php.ini 的 disable_functions 与 R08 / R09。
+
+
+# =====================================================================
+# 【可选加固区】（默认全部注释；每一项启用前先在模拟模式下观察）
+# =====================================================================
+
+# --- A. readonly_exec：只允许执行"PHP 进程不可写"的文件 ---
+# 作用  ：防 WebShell 的最强手段之一——被攻击者写进可写目录的 PHP 文件无法被执行。
+# 前提  ：WordPress 代码目录（核心、主题、插件）必须 root 所有、www-data 不可写，
+#         只有 wp-content/uploads 等少数目录可写。
+# 代价  ：启用后无法通过后台直接安装/更新插件和主题（需重建镜像或用 root 更新）。
+#         如果代码目录当前是 www-data 可写的，启用后站点会整体无法运行——务必先改权限。
+# 启用  ：先用模拟模式观察，再正式启用：
+# sp.readonly_exec.simulation().enable();
+# sp.readonly_exec.enable();
+
+# --- B. wrappers_whitelist：限制可用的流包装器 ---
+# 作用  ：只允许下面列出的协议被 fopen/file_get_contents 等使用，
+#         封堵 phar://（反序列化）、expect:// 等。
+# 风险  ：WordPress 需要 file、php、http、https、data、glob，部分插件还要 phar、zip；
+#         漏写会导致功能异常，务必先模拟。
+# sp.wrappers_whitelist.list("file,php,http,https,data,glob,phar").simulation();
+
+# --- C. Session 加密 ---
+# 要求  ：同时设置 secret_key 和 cookie_env_var，否则 PHP 启动即 Fatal（实测）。
+# 风险  ：无法解密的请求会被直接丢弃；密钥绑定 cookie_env_var（如 REMOTE_ADDR），
+#         用户 IP 变化（手机切换网络）会导致 Session 失效；secret_key 绝不能写进公开仓库。
+#         WordPress 登录态主要靠自己的认证 Cookie，不依赖 PHP Session，收益有限，默认不启用。
+# sp.global.secret_key("<随机 64 位字符，只放部署环境，不要提交到仓库>");
+# sp.global.cookie_env_var("REMOTE_ADDR");
+# sp.session.encrypt();
+
+# --- D. 禁止在 uploads 目录写入 .php 文件 ---
+# 作用  ：封堵"通过 file_put_contents 等函数往上传目录写 WebShell"。
+# 风险  ：部分插件会在 uploads 子目录写 index.php（"Silence is golden"）防目录列表，会被误拦，
+#         所以默认不启用；启用前务必模拟观察。
+# sp.disable_function.function("file_put_contents").param("filename").value_r("/wp-content/uploads/.*\\.(php[0-9s]?|phtml|phar)$").drop().simulation();
+
+# --- 明确不要启用的功能（与 WordPress 不兼容）---
+# sp.unserialize_hmac.enable();   # WordPress 数据库里大量历史序列化数据没有 HMAC，启用后读取会失败
+# sp.global_strict.enable();      # 会让大量插件/主题的弱类型调用报错
+# sp.sloppy_comparison.enable();  # 同上，WordPress 生态大量依赖松散比较
+
+
+# =====================================================================
+# 【规则管不到的事】（对 WordPress 同样关键，需要在别处配置）
+# =====================================================================
+# 1) php.ini 增加一行：  user_ini.filename =
+#    （留空 = 禁用 .user.ini）。你的 php.ini 里该项被注释掉了，PHP-FPM 默认是启用的，
+#    攻击者能写入 .user.ini 就能通过 auto_prepend_file 执行代码。R12 只拦"上传"这一条路径。
+# 2) nginx 禁止 uploads 目录执行 PHP（WordPress 头号攻击路径）：
+#    location ~* ^/wp-content/uploads/.*\.php$ { deny all; }
+# 3) nginx 与 R04：TLS 由上层代理终结时加  fastcgi_param HTTPS on;
+#    ★ 绝对不要写  fastcgi_param HTTPS off;（只要键存在就会加 Secure，纯 HTTP 登录会失效）。
+# 4) 本文件不替代：及时更新核心/插件、最小权限的文件所有权、WAF、备份。
+
+
+# =====================================================================
+# 【部署步骤】
+# =====================================================================
+# 一、先在临时容器里验证规则能加载，且行为符合预期（不影响线上）：
+#      ./verify-snuffleupagus.sh docker 你的镜像名 ./snuffleupagus-wordpress.rules
+#    全部 PASS 才继续。
+#
+# 二、生成【模拟模式】副本（只记日志、不拦截），放到线上先观察：
+#      sed -E 's/\.drop\(\)/.drop().simulation()/g; s/^(sp\.eval_blacklist\.list\("[^"]*"\))\s*;/\1.simulation();/' \
+#        snuffleupagus-wordpress.rules > snuffleupagus.simulation.rules
+#    覆盖到 php-conf 卷并重启（compose 的卷名为 php-conf）：
+#      docker compose stop php
+#      docker run --rm -v php-conf:/data -v "$PWD/snuffleupagus.simulation.rules:/new:ro" \
+#        debian:bookworm-slim sh -c 'cp /new /data/snuffleupagus.rules && chmod 600 /data/snuffleupagus.rules'
+#      docker compose start php
+#
+# 三、观察 1~2 周（把后台每个功能点一遍：更新、上传、备份、缓存、支付、邮件），查误报：
+#      docker exec php grep "snuffleupagus" /opt/php/var/log/php_error.log | sort | uniq -c | sort -rn | head
+#    出现 [simulation] 行 = 如果是正式模式这次请求就会被终止。逐条判断：
+#      - 是攻击/探测行为 → 保持规则；
+#      - 是正常插件行为 → 对该插件针对性放行（写一条 .allow()，放在对应 drop 之前），不要整条删规则。
+#
+# 四、没有误报后，用本文件（正式拦截版）按第二步同样方式覆盖并重启。
+#    之后新建部署（新卷）会直接使用镜像内的这份规则。
