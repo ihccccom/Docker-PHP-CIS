@@ -503,6 +503,11 @@ RUN set -eux; \
       rm -rf snuffleupagus; \
     fi
 
+# 清理源码之前，保存 PHP 官方生产配置模板
+RUN install -D -m 644 \
+    ${PHP_SRC_DIR}/php/php.ini-production \
+    /opt/php/php.ini-production
+
 # 清理源码目录以减小镜像体积
 RUN rm -rf ${PHP_SRC_DIR}
 
@@ -617,7 +622,9 @@ RUN mkdir -p \
 # ============================================================
 
 # 复制 PHP 配置文件
-# COPY conf/php.ini ${PHP_DIR}/etc/php.ini
+# 使用 PHP 官方生产配置
+COPY --from=builder /opt/php/php.ini-production ${PHP_DIR}/etc/php.ini
+COPY conf/php.ini ${PHP_DIR}/etc/php.ini.template
 COPY conf/php-fpm.conf ${PHP_DIR}/etc/php-fpm.conf
 COPY conf/www.conf ${PHP_DIR}/etc/php-fpm.d/www.conf
 
