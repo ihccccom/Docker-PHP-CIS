@@ -10,12 +10,15 @@
 
 ; ============================================================
 ; Cookie 安全加固
-; 设置所有 Cookie 为 HttpOnly + Secure + SameSite=Lax
-; 防止 XSS 窃取 Cookie（PCI DSS 合规）
+; 注意：Snuffleupagus 的 sp.cookie 规则没有 httponly() / secure() 这两个关键字，
+;       写了会导致 PHP 启动时 Fatal error。对应功能这样实现：
+;   - Secure  ：sp.auto_cookie_secure，经 HTTPS 访问时自动给 Cookie 加 Secure 标志
+;   - HttpOnly：由 php.ini 的 session.cookie_httponly=1 保证（仅会话 Cookie），
+;               其他 Cookie 需由应用自己在 setcookie() 时设置
+;   - SameSite：name_r 是正则匹配，".*" 表示所有 Cookie
 ; ============================================================
-sp.cookie.name("*").httponly();
-sp.cookie.name("*").secure();
-sp.cookie.name("*").samesite("strict");
+sp.auto_cookie_secure.enable();
+sp.cookie.name_r(".*").samesite("strict");
 
 ; ============================================================
 ; 禁止不安全的 PHP 运行时设置
@@ -43,10 +46,18 @@ sp.xxe_protection.enable();
 ; sp.global.mail_allowlist("127.0.0.1").enable();
 
 ; ============================================================
-; 自动加密 Session 数据（防止 Session 劫持）
-; 使用 sodium 库加密，密钥自动从 cookie 派生
+; Session 加密（默认关闭）
+; 启用 sp.session.encrypt() 必须先在 sp.global 里同时设置 secret_key 和 cookie_env_var，
+; 否则 PHP 启动时报 Fatal error。官方还说明：无法解密的请求会被直接丢弃，
+; 而密钥会绑定 cookie_env_var（如 REMOTE_ADDR），用户 IP 变化（手机切换网络等）
+; 就会导致 Session 失效，且 secret_key 不能写进公开仓库。
+; 在 Session 文件目录已是 www-data 专用 700 目录的前提下，收益有限、风险较高，
+; 因此默认不启用。确需启用时，在部署环境的规则文件（卷内）里加入：
+;   sp.global.secret_key("<随机 64 位字符，不要提交到仓库>");
+;   sp.global.cookie_env_var("REMOTE_ADDR");
+;   sp.session.encrypt();
 ; ============================================================
-sp.session.encrypt();
+; sp.session.encrypt();
 
 ; ============================================================
 ; 限制 eval() 使用（如需完全禁用，取消注释下行）
