@@ -383,7 +383,8 @@ RUN set -eux; \
     fi; \
     # PEAR/PECL 在 make install 后独立安装，避免 PEAR 安装程序在 QEMU 跨架构构建时挂起
     # --- OPcache ---
-    # PHP 8.x OPcache 默认已编译（--enable-opcache 为默认值），运行时通过 zend_extension=opcache.so 加载
+    # PHP 8.5+ 已内置 OPcache（始终加载，无需也不能用 configure 开关控制）；
+    # PHP 8.4 及以下默认也会编译，运行时才需要 zend_extension=opcache.so（见运行阶段的判断）。
     # --- 自定义扩展参数 ---
     if [ -n "${EXTRA_PHP_EXTENSIONS}" ]; then \
       CONFIGURE_ARGS="$CONFIGURE_ARGS ${EXTRA_PHP_EXTENSIONS}"; \
