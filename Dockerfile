@@ -702,7 +702,7 @@ RUN chmod 500 /docker-entrypoint.sh
 
 # 创建健康检查脚本（在构建时创建，避免运行时写入只读文件系统）
 # 使用 PID 文件 + kill -0 检查，无需 procps/pgrep 包
-RUN printf '#!/bin/sh\n# CIS Docker 4.6 - 健康检查：通过 PID 文件验证 php-fpm master 存活\nPHP_FPM_PID=/opt/php/var/run/php-fpm.pid\nif [ -s "$PHP_FPM_PID" ] && kill -0 "$(cat $PHP_FPM_PID)" 2>/dev/null; then\n  exit 0\nfi\nexit 1\n' \
+RUN printf '#!/bin/sh\n# CIS Docker 4.6 - 健康检查：通过 PID 文件验证 php-fpm master 存活\nPHP_FPM_PID=/run/php-fpm.pid\nif [ -s "$PHP_FPM_PID" ] && kill -0 "$(cat $PHP_FPM_PID)" 2>/dev/null; then\n  exit 0\nfi\nexit 1\n' \
     > /usr/local/bin/php-fpm-healthcheck \
     && chmod 555 /usr/local/bin/php-fpm-healthcheck
 
