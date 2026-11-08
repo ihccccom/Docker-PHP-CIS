@@ -139,7 +139,7 @@ ARG EXTRA_PHP_EXTENSIONS=""
 # Stage 1: 编译阶段 (Build Stage)
 # 使用完整 Debian 进行编译，最终镜像只保留运行时文件
 # =======================================================
-FROM debian:bookworm-slim AS builder
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS builder
 
 # hadolint ignore=DL4006
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -517,7 +517,7 @@ RUN rm -rf ${PHP_SRC_DIR}
 # Stage 2: 运行阶段 (Runtime Stage)
 # CIS Docker Benchmark 合规 - 最小化镜像
 # =======================================================
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 # hadolint ignore=DL4006
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
